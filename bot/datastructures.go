@@ -25,7 +25,7 @@ type channelMapValue struct {
 	keyhistory []uint32
 }
 
-func (m *messageMap) Put(message *discordgo.Message) bool {
+func (m *messageMap) Put(message *discordgo.Message, maxDuplicateAge time.Duration) bool {
 	value := &userMapValue{
 		bufferSize: 5,
 	}
@@ -36,11 +36,27 @@ func (m *messageMap) Put(message *discordgo.Message) bool {
 	v, _ = value.channelMap.LoadOrStore(message.ChannelID, channelValue)
 	channelValue = v.(*channelMapValue)
 
-	if channelValue.DuplicatePresent(message, 30*time.Second) {
+	if channelValue.DuplicatePresent(message, maxDuplicateAge) {
 		return false
 	}
 	channelValue.Add(message, value.bufferSize)
 	return true
+}
+
+func (m *messageMap) Delete(message *discordgo.Message) {
+	v, ok := m.userMap.Load(message.Author.ID)
+	if !ok {
+		return
+	}
+	value := v.(*userMapValue)
+
+	v, ok = value.channelMap.Load(message.ChannelID)
+	if !ok {
+		return
+	}
+	channelValue := v.(*channelMapValue)
+
+	channelValue.Delete(message)
 }
 
 func (c *channelMapValue) Add(message *discordgo.Message, size int) {
@@ -72,6 +88,30 @@ func (c *channelMapValue) DuplicatePresent(message *discordgo.Message, maxDuplic
 	}
 	timestamp, err := oldmsg.Timestamp.Parse()
 	return err == nil && timestamp.After(time.Now().Add(-maxDuplicateAge))
+}
+
+func (c *channelMapValue) Delete(message *discordgo.Message) {
+	c.Lock()
+	defer c.Unlock()
+
+	if c.messages == nil {
+		return
+	}
+
+	for hash, m := range c.messages {
+		if message.ID != m.ID {
+			continue
+		}
+		delete(c.messages, hash)
+		for i, h := range c.keyhistory {
+			if h != hash {
+				continue
+			}
+			c.keyhistory = append(c.keyhistory[:i], c.keyhistory[i+1:]...)
+			break
+		}
+		break
+	}
 }
 
 func hashMessage(m *discordgo.Message) uint32 {

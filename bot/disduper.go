@@ -4,6 +4,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -17,6 +18,8 @@ type Disduper struct {
 	currentGuilds     sync.Map
 	operatingChannels sync.Map
 
+	maxDuplicateAge time.Duration
+
 	handledCount   int
 	actedUponCount int
 }
@@ -24,6 +27,7 @@ type Disduper struct {
 // Start starts the Discord bot
 func (dd *Disduper) Start(token string, log *log.Logger) (err error) {
 	dd.log = log
+	dd.maxDuplicateAge = 30 * time.Second
 
 	if !strings.HasPrefix(token, "Bot ") {
 		token = "Bot " + token
@@ -40,12 +44,14 @@ func (dd *Disduper) Start(token string, log *log.Logger) (err error) {
 	}
 
 	dd.session.AddHandler(dd.messageCreate)
+	dd.session.AddHandler(dd.messageUpdate)
 	dd.session.AddHandler(dd.guildCreate)
 	dd.session.AddHandler(dd.guildDelete)
 	dd.session.AddHandler(dd.channelCreate)
 	dd.session.AddHandler(dd.channelUpdate)
 	dd.session.AddHandler(dd.channelDelete)
 	dd.session.AddHandler(dd.userUpdate)
+	dd.session.AddHandler(dd.guildMemberUpdate)
 	dd.session.AddHandler(dd.roleUpdate)
 
 	err = dd.session.Open()
@@ -59,6 +65,7 @@ func (dd *Disduper) Start(token string, log *log.Logger) (err error) {
 // InitIntegrated initializes Disduper to work as part of a larger bot
 func (dd *Disduper) InitIntegrated(log *log.Logger, session *discordgo.Session) (err error) {
 	dd.log = log
+	dd.maxDuplicateAge = 30 * time.Second
 
 	dd.session = session
 
@@ -67,12 +74,14 @@ func (dd *Disduper) InitIntegrated(log *log.Logger, session *discordgo.Session) 
 		return err
 	}
 
+	dd.session.AddHandler(dd.messageUpdate)
 	dd.session.AddHandler(dd.guildCreate)
 	dd.session.AddHandler(dd.guildDelete)
 	dd.session.AddHandler(dd.channelCreate)
 	dd.session.AddHandler(dd.channelUpdate)
 	dd.session.AddHandler(dd.channelDelete)
 	dd.session.AddHandler(dd.userUpdate)
+	dd.session.AddHandler(dd.guildMemberUpdate)
 	dd.session.AddHandler(dd.roleUpdate)
 
 	return nil
@@ -94,7 +103,7 @@ func (dd *Disduper) Handle(s *discordgo.Session, m *discordgo.MessageCreate, mut
 	}
 	dd.handledCount++
 
-	if !dd.msgMap.Put(m.Message) {
+	if !dd.msgMap.Put(m.Message, dd.maxDuplicateAge) {
 		if err := s.ChannelMessageDelete(m.ChannelID, m.ID); err != nil {
 			dd.log.Println("Error deleting message: " + err.Error())
 			return false
@@ -126,6 +135,13 @@ func (dd *Disduper) messageCreate(s *discordgo.Session, m *discordgo.MessageCrea
 	dd.Handle(s, m, false)
 }
 
+func (dd *Disduper) messageUpdate(s *discordgo.Session, m *discordgo.MessageUpdate) {
+	timestamp, err := m.Timestamp.Parse()
+	if err == nil && timestamp.After(time.Now().Add(-dd.maxDuplicateAge)) {
+		dd.msgMap.Delete(m.Message)
+	}
+}
+
 func (dd *Disduper) guildCreate(s *discordgo.Session, g *discordgo.GuildCreate) {
 	dd.currentGuilds.Store(g.ID, true)
 	for _, channel := range g.Channels {
@@ -149,6 +165,12 @@ func (dd *Disduper) channelDelete(s *discordgo.Session, c *discordgo.ChannelDele
 func (dd *Disduper) userUpdate(s *discordgo.Session, c *discordgo.UserUpdate) {
 	if c.ID == dd.self.ID {
 		dd.refreshPermissionsForAllGuilds()
+	}
+}
+
+func (dd *Disduper) guildMemberUpdate(s *discordgo.Session, g *discordgo.GuildMemberUpdate) {
+	if g.Member.User.ID == dd.self.ID {
+		dd.refreshPermissionsForGuild(g.GuildID)
 	}
 }
 
